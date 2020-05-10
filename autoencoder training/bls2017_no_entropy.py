@@ -66,7 +66,7 @@ def write_png(filename, image):
 
 
 class AnalysisTransform(tf.keras.layers.Layer):
-  """The faster analysis transform."""
+  """The analysis transform."""
 
   def __init__(self, num_filters, *args, **kwargs):
     self.num_filters = num_filters
@@ -79,22 +79,12 @@ class AnalysisTransform(tf.keras.layers.Layer):
             padding="same_zeros", use_bias=True,
             activation=tfc.GDN(name="gdn_0")),
         tfc.SignalConv2D(
-            1, (5, 5), name="layer_1dw", corr=True, strides_down=2,
-            padding="same_zeros", use_bias=True,
-            channel_separable=True,
-            activation=None),
-        tfc.SignalConv2D(
-            self.num_filters, (1, 1), name="layer_1pw", corr=True, strides_down=1,
+            self.num_filters, (5, 5), name="layer_1", corr=True, strides_down=2,
             padding="same_zeros", use_bias=True,
             activation=tfc.GDN(name="gdn_1")),
         tfc.SignalConv2D(
-            1, (5, 5), name="layer_2dw", corr=True, strides_down=2,
-            padding="same_zeros", use_bias=True,
-            channel_separable=True,
-            activation=None),
-        tfc.SignalConv2D(
-            self.num_filters, (1, 1), name="layer_2pw", corr=True, strides_down=1,
-            padding="same_zeros", use_bias=True,
+            self.num_filters, (5, 5), name="layer_2", corr=True, strides_down=2,
+            padding="same_zeros", use_bias=False,
             activation=None),
     ]
     super(AnalysisTransform, self).build(input_shape)
@@ -115,24 +105,15 @@ class SynthesisTransform(tf.keras.layers.Layer):
   def build(self, input_shape):
     self._layers = [
         tfc.SignalConv2D(
-            1, (5, 5), name="layer_0dw", corr=False, strides_up=2,
-            padding="same_zeros", use_bias=True,
-            activation=None),
-        tfc.SignalConv2D(
-            self.num_filters, (1, 1), name="layer_0pw", corr=False, strides_up=1,
+            self.num_filters, (5, 5), name="layer_0", corr=False, strides_up=2,
             padding="same_zeros", use_bias=True,
             activation=tfc.GDN(name="igdn_0", inverse=True)),
         tfc.SignalConv2D(
-            1, (5, 5), name="layer_1dw", corr=False, strides_up=2,
-            padding="same_zeros", use_bias=True,
-            channel_separable=True,
-            activation=None),
-        tfc.SignalConv2D(
-            self.num_filters, (1, 1), name="layer_1pw", corr=False, strides_up=1,
+            self.num_filters, (5, 5), name="layer_1", corr=False, strides_up=2,
             padding="same_zeros", use_bias=True,
             activation=tfc.GDN(name="igdn_1", inverse=True)),
         tfc.SignalConv2D(
-            3, (9, 9), name="layer_3", corr=False, strides_up=4,
+            3, (9, 9), name="layer_2", corr=False, strides_up=4,
             padding="same_zeros", use_bias=True,
             activation=None),
     ]
@@ -165,114 +146,76 @@ def train(args):
     train_dataset = train_dataset.batch(args.batchsize)
     train_dataset = train_dataset.prefetch(32)
 
-  num_pixels = args.batchsize * args.patchsize ** 2
+  #num_pixels = args.batchsize * args.patchsize ** 2
 
   # Get training patch from dataset.
   x = train_dataset.make_one_shot_iterator().get_next()
 
   # Instantiate model.
   analysis_transform = AnalysisTransform(args.num_filters)
-  entropy_bottleneck = tfc.EntropyBottleneck()
+  #entropy_bottleneck = tfc.EntropyBottleneck()
   synthesis_transform = SynthesisTransform(args.num_filters)
 
   # Build autoencoder.
   y = analysis_transform(x)
-  y_tilde, likelihoods = entropy_bottleneck(y, training=True)
-  x_tilde = synthesis_transform(y_tilde)
+  #y_tilde, likelihoods = entropy_bottleneck(y, training=True)
+  x_tilde = synthesis_transform(y)
 
   # Total number of bits divided by number of pixels.
-  train_bpp = tf.reduce_sum(tf.log(likelihoods)) / (-np.log(2) * num_pixels)
+  #train_bpp = tf.reduce_sum(tf.log(likelihoods)) / (-np.log(2) * num_pixels)
 
   # Mean squared error across pixels.
   train_mse = tf.reduce_mean(tf.squared_difference(x, x_tilde))
-  # Multiply by 255^2 to correct for rescaling.
-  train_mse *= 255 ** 2
 
+  # Multiply by 255^2 to correct for rescaling.
+  #train_mse *= 255 ** 2
+
+  # Calculate psnr and ssim
+  train_psnr = tf.reduce_mean(tf.image.psnr(x_tilde, x, 255))
+  train_msssim_value = tf.reduce_mean(tf.image.ssim_multiscale(x_tilde, x, 255))
+
+  # structural similarity loss
   train_ssim = tf.reduce_mean(1 - tf.image.ssim_multiscale(x_tilde, x, 1))
 
   #Choose distortion metric
   distortion = train_ssim if args.ssim_loss else train_mse
   
   # The rate-distortion cost.
-  train_loss = args.lmbda * distortion + train_bpp
+  train_loss = distortion
 
   # Minimize loss and auxiliary loss, and execute update op.
   step = tf.train.create_global_step()
   main_optimizer = tf.train.AdamOptimizer(learning_rate=1e-4)
   main_step = main_optimizer.minimize(train_loss, global_step=step)
 
-  aux_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
-  aux_step = aux_optimizer.minimize(entropy_bottleneck.losses[0])
+  #aux_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
+  #aux_step = aux_optimizer.minimize(entropy_bottleneck.losses[0])
 
-  train_op = tf.group(main_step, aux_step, entropy_bottleneck.updates[0])
+  train_op = tf.group(main_step)
 
-  s_loss = tf.summary.scalar("loss", train_loss)
-  s_bpp = tf.summary.scalar("bpp", train_bpp)
-  s_mse = tf.summary.scalar("mse", train_mse)
-  s_ssim = tf.summary.scalar("multiscale ssim", -10 * tf.log(train_ssim) / np.log(10)) 
+  # Log scalar values
+  s_loss = tf.summary.scalar("train/loss", train_loss)
+  #s_bpp = tf.summary.scalar("train/bpp", train_bpp)
+  s_mse = tf.summary.scalar("train/mse", train_mse)
+  s_psnr = tf.summary.scalar("train/psnr", train_psnr)
+  s_msssim_value = tf.summary.scalar("train/multiscale ssim value", train_msssim_value)
+  s_ssim = tf.summary.scalar("train/multiscale ssim", -10 * tf.log(train_ssim)) 
 
-  #Merge scalars into a summary
-  train_summary = tf.summary.merge([s_loss, s_bpp, s_mse, s_ssim])
+  # Log training images
+  s_original = tf.summary.image("images/original", quantize_image(x))
+  s_reconstruction = tf.summary.image("images/reconstruction", quantize_image(x_tilde))
 
-  #tf.summary.image("original", quantize_image(x))
-  #tf.summary.image("reconstruction", quantize_image(x_tilde))
+  # Merge scalars into a summary
+  train_summary = tf.summary.merge([s_loss, s_mse, s_psnr, s_msssim_value, s_ssim])
 
-  # Validation
-  def generic_central_crop(size):    
-    def _crop(image, size):      
-      h, w = tf.shape(image)[0], tf.shape(image)[1]
-      image_crop = image[h//2 - size//2: h//2 + size//2, w//2 - size//2 :w//2 + size//2]
-      image_crop.set_shape([512, 512, 3])
-      return image_crop
-    return lambda x: _crop(x, size)
-
-  central_crop = generic_central_crop(args.valid_patchsize)
-
-  with tf.device("/cpu:0"):
-    valid_files = glob.glob(args.test_glob)
-    if not valid_files:
-      raise RuntimeError(
-        "No validation images found with glob '{}'.".format(args.valid_glob))
-    valid_dataset = tf.data.Dataset.from_tensor_slices(valid_files)
-    valid_dataset = valid_dataset.repeat()
-    valid_dataset = valid_dataset.map(
-        read_png, num_parallel_calls=args.preprocess_threads)
-    valid_dataset = valid_dataset.map(lambda x: central_crop(x))
-    valid_dataset = valid_dataset.batch(args.batchsize)
-    valid_dataset = valid_dataset.prefetch(2*args.batchsize)
-  
-  valid_x = valid_dataset.make_one_shot_iterator().get_next() 
-
-  # Build autoencoder.
-  valid_y = analysis_transform(valid_x)
-  valid_y_tilde, valid_likelihoods = entropy_bottleneck(valid_y, training=False)
-  valid_x_tilde = synthesis_transform(valid_y_tilde)
-
-  # Total number of bits divided by number of pixels.
-  valid_bpp = tf.reduce_sum(tf.log(valid_likelihoods)) / (-np.log(2) * (args.batchsize*args.valid_patchsize ** 2))
-  # Mean squared error across pixels.
-  valid_mse = tf.reduce_mean(tf.squared_difference(valid_x, valid_x_tilde))
-  # Multiply by 255^2 to correct for rescaling.
-  valid_mse *= 255 ** 2
-  valid_ssim = tf.reduce_mean(1 - tf.image.ssim_multiscale(valid_x_tilde,valid_x, 1))
-
-  valid_distortion = valid_ssim if args.ssim_loss else valid_mse
-
-  # The rate-distortion cost.
-  valid_loss = args.lmbda * valid_distortion + valid_bpp
-
-  s_valid_loss = tf.summary.scalar("valid_loss", valid_loss)
-  s_valid_mse = tf.summary.scalar("valid_mse", valid_mse)
-  s_valid_ssim = tf.summary.scalar("valid_msssim", valid_ssim)
-  s_valid_bpp = tf.summary.scalar("valid_bpp", valid_bpp)
-
-  valid_summary = tf.summary.merge([s_valid_loss, s_valid_mse, s_valid_bpp, s_valid_ssim])
+  #Merge images into a summary
+  image_summary = tf.summary.merge([s_original, s_reconstruction])
 
   hooks = [
       tf.train.StopAtStepHook(last_step=args.last_step),
       tf.train.NanTensorHook(train_loss),
       tf.train.SummarySaverHook(save_secs=30,output_dir=args.checkpoint_dir,summary_op=train_summary),
-      tf.train.SummarySaverHook(save_secs=60,output_dir=args.checkpoint_dir,summary_op=valid_summary)
+      tf.train.SummarySaverHook(save_secs=3600,output_dir=args.checkpoint_dir,summary_op=image_summary)
   ]
   with tf.train.MonitoredTrainingSession(
       hooks=hooks, checkpoint_dir=args.checkpoint_dir,
@@ -441,7 +384,7 @@ def parse_args(argv):
       help="Glob pattern identifying testing data. This pattern must expand "
            "to a list of RGB images in PNG format.")
   train_cmd.add_argument(
-      "--experiment_name", default="lambda2e-3_channels64",
+      "--experiment_name", default="64filters_noentropy",
       help="Directory where to save/load model checkpoints.")
   train_cmd.add_argument(
       "--batchsize", type=int, default=8,
@@ -453,7 +396,7 @@ def parse_args(argv):
       "--lambda", type=float, default=0.002,dest="lmbda",
       help="Lambda for rate-distortion tradeoff.")
   train_cmd.add_argument(
-      "--last_step", type=int, default=600000,
+      "--last_step", type=int, default=800000,
       help="Train up to this number of steps.")
   train_cmd.add_argument(
       "--preprocess_threads", type=int, default=12,
