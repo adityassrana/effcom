@@ -190,8 +190,8 @@ def train(args):
   #train_mse *= 255 ** 2
 
   # Calculate psnr and ssim
-  train_psnr = tf.reduce_mean(tf.image.psnr(x_tilde, x, 255))
-  train_msssim_value = tf.reduce_mean(tf.image.ssim_multiscale(x_tilde, x, 255))
+  train_psnr = tf.reduce_mean(tf.image.psnr(x_tilde, x, 1))
+  train_msssim_value = tf.reduce_mean(tf.image.ssim_multiscale(x_tilde, x, 1))
 
   # structural similarity loss
   train_ssim = tf.reduce_mean(1 - tf.image.ssim_multiscale(x_tilde, x, 1))
